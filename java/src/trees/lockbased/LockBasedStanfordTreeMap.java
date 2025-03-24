@@ -46,6 +46,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 import contention.abstractions.CompositionalMap;
 import contention.abstractions.CompositionalMap.Vars;
@@ -70,6 +71,13 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		CompositionalMap<K, V> {
 	// public class OptTreeMap<K,V> extends AbstractMap<K,V> implements
 	// ConcurrentMap<K,V> {
+
+	public enum RebalanceMode {
+		None,
+		AVL,
+		Splay,
+		SimpleSplay,
+	}
 
 	/**
 	 * This is a special value that indicates the presence of a null value, to
@@ -101,6 +109,20 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	static final int ReturnKey = 0;
 	static final int ReturnEntry = 1;
 	static final int ReturnNode = 2;
+
+	static final double SPLAY_PROB = 1.0 / 10;
+	static final RebalanceMode REBALANCE_MODE = RebalanceMode.Splay;
+	// static final boolean STRUCT_MODS = true;
+
+	private static long getIterations(final long depth) {
+		// return depth / 9;
+		// return Math.max(0, depth - 13);
+		return depth / 8;
+	}
+
+	private static double rotateProb(final long depth) {
+		return 1.0;
+	}
 
 	/**
 	 * An <tt>OVL</tt> is a version number and lock used for optimistic
@@ -387,7 +409,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// the reread of .right is the one protected by our read of
 					// ovl
 					final Object vo = attemptGet(k, right, (rightCmp < 0 ? Left
-							: Right), ovl);
+							: Right), ovl, 1);
 					if (vo != SpecialRetry) {
 						if (TRAVERSAL_COUNT) {
 							finishCount1(nodesTraversed);
@@ -401,7 +423,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	private Object attemptGet(final Comparable<? super K> k,
-			final Node<K, V> node, final char dirToC, final long nodeOVL) {
+			final Node<K, V> node, final char dirToC, final long nodeOVL, final long depth) {
 		int nodesTraversed = 0;
 		while (true) {
 			final Node<K, V> child = node.child(dirToC);
@@ -430,6 +452,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// how we got here is irrelevant
 					if (TRAVERSAL_COUNT) {
 						finishCount2(nodesTraversed);
+					}
+					if (REBALANCE_MODE == RebalanceMode.Splay
+						&& ThreadLocalRandom.current().nextDouble() < SPLAY_PROB
+					) {
+						splay(child, depth);
 					}
 					return child.vOpt;
 				}
@@ -471,7 +498,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// no longer vulnerable to node shrinks, and we don't need
 					// to validate nodeOVL any more.
 					final Object vo = attemptGet(k, child, (childCmp < 0 ? Left
-							: Right), childOVL);
+							: Right), childOVL, depth + 1);
 					if (vo != SpecialRetry) {
 						if (TRAVERSAL_COUNT) {
 							finishCount2(nodesTraversed);
@@ -773,7 +800,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 
 							// attempt to fix node.height while we've still got
 							// the lock
-							damaged = fixHeight_nl(node);
+							if (REBALANCE_MODE == RebalanceMode.AVL) {
+								damaged = fixHeight_nl(node);
+							} else {
+								damaged = null;
+							}
 						}
 					}
 					if (success) {
@@ -851,7 +882,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					}
 				}
 				// try to fix the parent while we've still got the lock
-				damaged = fixHeight_nl(parent);
+				if (REBALANCE_MODE == RebalanceMode.AVL) {
+					damaged = fixHeight_nl(parent);
+				} else {
+					damaged = null;
+				}
 			}
 			fixHeightAndRebalance(damaged);
 			return prev;
@@ -985,7 +1020,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 						// success!
 					}
 					// try to fix parent.height while we've still got the lock
-					damaged = fixHeight_nl(parent);
+					if (REBALANCE_MODE == RebalanceMode.AVL) {
+						damaged = fixHeight_nl(parent);
+					} else {
+						damaged = null;
+					}
 				}
 				fixHeightAndRebalance(damaged);
 				return new SimpleImmutableEntry<K, V>(node.key, decodeNull(vo));
@@ -1051,6 +1090,63 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		return hN != hNRepl ? hNRepl : NothingRequired;
 	}
 
+	private void splay(Node<K, V> node, final long depth) {
+		long iterations = getIterations(depth);
+		while (node != null && iterations > 0) {
+			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth)) {
+				break;
+			}
+			final Node<K, V> nParent = node.parent;
+			if (nParent == null) {
+				return;
+			}
+			final Node<K, V> ngParent = nParent.parent;
+			if (ngParent == null) {
+				return;
+			}
+			final Node<K, V> nggParent = ngParent.parent;
+			if (nggParent == null) {
+				synchronized (ngParent) {
+					if (!isUnlinked(ngParent.changeOVL)
+							&& nParent.parent == ngParent) {
+						synchronized (nParent) {
+							if (!isUnlinked(nParent.changeOVL)
+									&& node.parent == nParent) {
+								synchronized (node) {
+									if (!isUnlinked(node.changeOVL)) {
+										node = zig(node, nParent, ngParent);
+									}
+								}
+							}
+						}
+					}
+				}
+			} else {
+				synchronized (nggParent) {
+					if (!isUnlinked(nggParent.changeOVL)
+							&& ngParent.parent == nggParent) {
+						synchronized (ngParent) {
+							if (!isUnlinked(ngParent.changeOVL)
+									&& nParent.parent == ngParent) {
+								synchronized (nParent) {
+									if (!isUnlinked(nParent.changeOVL)
+											&& node.parent == nParent) {
+										synchronized (node) {
+											if (!isUnlinked(node.changeOVL)) {
+												node = splay_once(node, nParent, ngParent, nggParent);
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			iterations--;
+		}
+	}
+
 	private void fixHeightAndRebalance(Node<K, V> node) {
 		while (node != null && node.parent != null) {
 			final int condition = nodeCondition(node);
@@ -1098,6 +1194,360 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 			// we've damaged our parent, but we can't fix it now
 			return node.parent;
 		}
+	}
+
+	private Node<K, V> zig(final Node<K, V> n, final Node<K, V> nParent, final Node<K, V> ngParent) {
+		final Node<K, V> nL = n.left;
+		final Node<K, V> nR = n.right;
+
+		if ((nL == null || nR == null) && n.vOpt == null && attemptUnlink_nl(nParent, n)) {
+			return null;
+		} else if (nParent.vOpt == null && (nParent.left == null || nParent.right == null) && attemptUnlink_nl(ngParent, nParent)) {
+			return n;
+		}
+
+		// if (nParent.parent != ngParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (ngParent.left != nParent && ngParent.right != nParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (n.parent != nParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (nParent.left != n && nParent.right != n) {
+		// 	throw new NullPointerException();
+		// }
+
+		if (nParent.left == n) {
+			return rotateRight(ngParent, nParent, n, nR);
+		} else {
+			return rotateLeft(ngParent, nParent, n, nL);
+		}
+		// return nParent;
+	}
+
+	private Node<K, V> splay_once(final Node<K, V> n,
+			final Node<K, V> nParent, final Node<K, V> ngParent,
+			final Node<K, V> nggParent) {
+		final Node<K, V> nL = n.left;
+		final Node<K, V> nR = n.right;
+
+		if ((nL == null || nR == null) && n.vOpt == null && attemptUnlink_nl(nParent, n)) {
+			return null;
+		} else if (nParent.vOpt == null && (nParent.left == null || nParent.right == null) && attemptUnlink_nl(ngParent, nParent)) {
+			return n;
+		} else if (ngParent.vOpt == null && (ngParent.left == null || ngParent.right == null) && attemptUnlink_nl(nggParent, ngParent)) {
+			return n;
+		}
+		// if (ngParent.parent != nggParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (nggParent.left != ngParent && nggParent.right != ngParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (nParent.parent != ngParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (ngParent.left != nParent && ngParent.right != nParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (n.parent != nParent) {
+		// 	throw new NullPointerException();
+		// }
+
+		// if (nParent.left != n && nParent.right != n) {
+		// 	throw new NullPointerException();
+		// }
+
+		if (ngParent.left == nParent && nParent.right == n) {
+			return zigzagRight(nggParent, ngParent, nParent, n);
+		} else if (ngParent.right == nParent && nParent.left == n) {
+			return zigzagLeft(nggParent, ngParent, nParent, n);
+		} else if (ngParent.left == nParent && nParent.left == n) {
+			return zigzigRight(nggParent, ngParent, nParent, n);
+		} else if (ngParent.right == nParent && nParent.right == n) {
+			return zigzigLeft(nggParent, ngParent, nParent, n);
+		} else {
+			throw new NullPointerException();
+		}
+		// return nParent;
+	}
+
+	private Node<K, V> rotateRight(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nL,
+			final Node<K, V> nLR) {
+		final long nodeOVL = n.changeOVL;
+		final long leftOVL = nL.changeOVL;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		final Node<K, V> nPL = nParent.left;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nL.changeOVL = beginGrow(leftOVL);
+
+		// Down links originally to shrinking nodes should be the last to
+		// change,
+		// because if we change them early a search might bypass the OVL that
+		// indicates its invalidity. Down links originally from shrinking nodes
+		// should be the first to change, because we have complete freedom when
+		// to
+		// change them. s/down/up/ and s/shrink/grow/ for the parent links.
+
+		n.left = nLR;
+		nL.right = n;
+		if (nPL == n) {
+			nParent.left = nL;
+		} else {
+			nParent.right = nL;
+		}
+
+		nL.parent = nParent;
+		n.parent = nL;
+		if (nLR != null) {
+			nLR.parent = n;
+		}
+
+		nL.changeOVL = endGrow(leftOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nL;
+	}
+
+	private Node<K, V> rotateLeft(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nR,
+			final Node<K, V> nRL) {
+		final long nodeOVL = n.changeOVL;
+		final long rightOVL = nR.changeOVL;
+
+		final Node<K, V> nPL = nParent.left;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nR.changeOVL = beginGrow(rightOVL);
+
+		n.right = nRL;
+		nR.left = n;
+		if (nPL == n) {
+			nParent.left = nR;
+		} else {
+			nParent.right = nR;
+		}
+
+		nR.parent = nParent;
+		n.parent = nR;
+		if (nRL != null) {
+			nRL.parent = n;
+		}
+
+		nR.changeOVL = endGrow(rightOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nR;
+	}
+
+	private Node<K, V> zigzagRight(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nL, final Node<K, V> nLR) {
+		final long nodeOVL = n.changeOVL;
+		final long leftOVL = nL.changeOVL;
+		final long leftROVL = nLR.changeOVL;
+
+		final Node<K, V> nPL = nParent.left;
+		final Node<K, V> nLRL = nLR.left;
+		final Node<K, V> nLRR = nLR.right;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nL.changeOVL = beginShrink(leftOVL);
+		nLR.changeOVL = beginGrow(leftROVL);
+
+		n.left = nLRR;
+		nL.right = nLRL;
+		nLR.left = nL;
+		nLR.right = n;
+		if (nPL == n) {
+			nParent.left = nLR;
+		} else {
+			nParent.right = nLR;
+		}
+
+		nLR.parent = nParent;
+		nL.parent = nLR;
+		n.parent = nLR;
+		if (nLRR != null) {
+			nLRR.parent = n;
+		}
+		if (nLRL != null) {
+			nLRL.parent = nL;
+		}
+
+		nLR.changeOVL = endGrow(leftROVL);
+		nL.changeOVL = endShrink(leftOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nLR;
+	}
+
+	private Node<K, V> zigzagLeft(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nR,
+			final Node<K, V> nRL) {
+		final long nodeOVL = n.changeOVL;
+		final long rightOVL = nR.changeOVL;
+		final long rightLOVL = nRL.changeOVL;
+
+		final Node<K, V> nPL = nParent.left;
+		final Node<K, V> nRLL = nRL.left;
+		final Node<K, V> nRLR = nRL.right;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nR.changeOVL = beginShrink(rightOVL);
+		nRL.changeOVL = beginGrow(rightLOVL);
+
+		n.right = nRLL;
+		nR.left = nRLR;
+		nRL.right = nR;
+		nRL.left = n;
+		if (nPL == n) {
+			nParent.left = nRL;
+		} else {
+			nParent.right = nRL;
+		}
+
+		nRL.parent = nParent;
+		nR.parent = nRL;
+		n.parent = nRL;
+		if (nRLL != null) {
+			nRLL.parent = n;
+		}
+		if (nRLR != null) {
+			nRLR.parent = nR;
+		}
+
+		nRL.changeOVL = endGrow(rightLOVL);
+		nR.changeOVL = endShrink(rightOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nRL;
+	}
+
+	private Node<K, V> zigzigRight(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nL, final Node<K, V> nLL) {
+		final long nodeOVL = n.changeOVL;
+		final long leftOVL = nL.changeOVL;
+		final long leftLOVL = nLL.changeOVL;
+
+		if (nLL.parent != nL || nL.parent != n || n.parent != nParent) {
+			throw new NullPointerException();
+		}
+
+		if (nParent.left != n && nParent.right != n) {
+			throw new NullPointerException();
+		}
+
+		if (n.left != nL || nL.left != nLL) {
+			throw new NullPointerException();
+		}
+
+		final Node<K, V> nPL = nParent.left;
+		final Node<K, V> nLR = nL.right;
+		final Node<K, V> nLLR = nLL.right;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nL.changeOVL = beginShrink(leftOVL);
+		nLL.changeOVL = beginGrow(leftLOVL);
+
+		nL.right = n;
+		nL.left = nLLR;
+		nLL.right = nL;
+
+		n.left = nLR;
+
+		if (nPL == n) {
+			nParent.left = nLL;
+		} else {
+			nParent.right = nLL;
+		}
+
+		nLL.parent = nParent;
+		nL.parent = nLL;
+		n.parent = nL;
+		if (nLLR != null) {
+			nLLR.parent = nL;
+		}
+		if (nLR != null) {
+			nLR.parent = n;
+		}
+
+		nLL.changeOVL = endGrow(leftLOVL);
+		nL.changeOVL = endShrink(leftOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nLL;
+	}
+
+	private Node<K, V> zigzigLeft(final Node<K, V> nParent,
+			final Node<K, V> n, final Node<K, V> nR, final Node<K, V> nRR) {
+		final long nodeOVL = n.changeOVL;
+		final long rightOVL = nR.changeOVL;
+		final long rightROVL = nRR.changeOVL;
+
+		final Node<K, V> nPL = nParent.left;
+		final Node<K, V> nRL = nR.left;
+		final Node<K, V> nRRL = nRR.left;
+
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
+
+		n.changeOVL = beginShrink(nodeOVL);
+		nR.changeOVL = beginShrink(rightOVL);
+		nRR.changeOVL = beginGrow(rightROVL);
+
+		nR.left = n;
+		nR.right = nRRL;
+		nRR.left = nR;
+
+		n.right = nRL;
+
+		if (nPL == n) {
+			nParent.left = nRR;
+		} else {
+			nParent.right = nRR;
+		}
+
+		nRR.parent = nParent;
+		nR.parent = nRR;
+		n.parent = nR;
+		if (nRRL != null) {
+			nRRL.parent = nR;
+		}
+		if (nRL != null) {
+			nRL.parent = n;
+		}
+
+		nRR.changeOVL = endGrow(rightROVL);
+		nR.changeOVL = endShrink(rightOVL);
+		n.changeOVL = endShrink(nodeOVL);
+
+		return nRR;
 	}
 
 	/**
