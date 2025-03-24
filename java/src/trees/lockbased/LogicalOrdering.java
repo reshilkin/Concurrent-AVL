@@ -7,6 +7,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -34,21 +35,41 @@ import contention.abstractions.CompositionalMap;
  * 
  * @author Dana Drachsler
  */
-public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements ConcurrentMap<K,V>, CompositionalMap<K, V> {
+public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements ConcurrentMap<K,V>, CompositionalMap<K, V> {
 
 	/** The tree's root */
-	private AVLMapNode<K,V> root;
+	private MapNode<K,V> root;
 	
+	public enum RebalanceMode {
+		None,
+		AVL,
+		Splay,
+	}
 	/** The keys' comparator */
 	private Comparator<? super K> comparator;
-	
+
+	final static RebalanceMode REBALANCE_MODE = RebalanceMode.AVL;
+	final static int CONFLICTS = 500;
+	final static int SPIN_COUNT = 100;
+	final static int MAX_DEPTH = 10;
+	final static boolean STRUCT_MODS = true;
+	static final double SPLAY_PROB = 1.0 / 100;
+	final static int THREAD_NUM = 16;
+
 	/** A constant object for the use of the {@code insert} method.  */
 	private final static Object EMPTY_ITEM = new Object();
 
-	
-	public LogicalOrderingAVL() {
-		AVLMapNode parent = new AVLMapNode(Integer.MIN_VALUE);
-		root = new AVLMapNode(Integer.MAX_VALUE, null, parent, parent, parent);
+
+	private static double rotateProb(final long depth, final long iterations) {
+		if (iterations == 0) {
+			return SPLAY_PROB / THREAD_NUM;
+		}
+		return 1.0;
+	}
+
+	public LogicalOrdering() {
+		MapNode parent = new MapNode(Integer.MIN_VALUE);
+		root = new MapNode(Integer.MAX_VALUE, null, parent, parent, parent);
 		root.parent = parent;
 		parent.right = root;
 		parent.succ = root;
@@ -64,9 +85,9 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param min The minimal value
 	 * @param max The maximal value
 	 */
-	public LogicalOrderingAVL(final K min, final K max) {
-		AVLMapNode<K,V> parent = new AVLMapNode<K,V>(min);
-		root = new AVLMapNode<K, V>(max, null, parent, parent, parent);
+	public LogicalOrdering(final K min, final K max) {
+		MapNode<K,V> parent = new MapNode<K,V>(min);
+		root = new MapNode<K, V>(max, null, parent, parent, parent);
 		root.parent = parent;
 		parent.right = root;
 		parent.succ = root;
@@ -83,7 +104,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param max The maximal value
 	 * @param comparator The keys' comparator
 	 */
-	public LogicalOrderingAVL(K min, K max, Comparator<? super K> comparator) {
+	public LogicalOrdering(K min, K max, Comparator<? super K> comparator) {
 		this(min, max);
 		this.comparator = comparator;
 	}
@@ -112,6 +133,21 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			}
 		};
 	}
+
+	void finishCount(int treeNodesTraversed, int logicalNodesTraversed, boolean found) {
+		Vars vars = counts.get();
+		vars.getCount++;
+		if (found) {
+			vars.foundCnt++;
+			vars.foundTreeTraversed += treeNodesTraversed;
+			vars.foundLogicalTraversed += logicalNodesTraversed;
+		} else {
+			vars.notFoundCnt++;
+			vars.notFoundTreeTraversed += treeNodesTraversed;
+			vars.notFoundLogicalTraversed += logicalNodesTraversed;
+		}
+		vars.nodesTraversed += treeNodesTraversed + logicalNodesTraversed;
+	}
 	
 	/**
 	 * Traverses the tree to find a node with the given key.
@@ -121,10 +157,13 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	final public V get(final Object key) {
 		final Comparable<? super K> value = comparable(key);
 
-		AVLMapNode<K,V> node = root;
-		AVLMapNode<K,V> child;
+		int treeTraversed = 0;
+
+		MapNode<K,V> node = root;
+		MapNode<K,V> child;
 		K val;
 		int res = -1;
+		int depth = 0;
 		while (true) {
 			if (res == 0) break;
 			if (res > 0) {
@@ -132,23 +171,50 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			} else {
 				child = node.left;
 			}
+			depth++;
+			if (TRAVERSAL_COUNT) {
+				treeTraversed++;
+			}
 			if (child == null) break;
 			node = child;
 			val = node.key;
 			res = value.compareTo(val);
 		}
+
+		int logicalTraversed = 0;
+		boolean logical = false;
+		boolean a = false;
 		while (res < 0) {
+			logical = true;
+			a = true;
 			node = node.pred;
 			val =  node.key;
 			res = value.compareTo(val);
+			if (TRAVERSAL_COUNT) {
+				logicalTraversed++;
+			}
 		}
-		while (res > 0) {
+		while (!a && res > 0) {
+			logical = true;
 			node = node.succ;
 			val =  node.key;
 			res = value.compareTo(val);
-		} 
+			if (TRAVERSAL_COUNT) {
+				logicalTraversed++;
+			}
+		}
+		depth = logical ? 0 : depth;
 		if (res == 0 && node.valid) {
+			if (TRAVERSAL_COUNT) {
+				finishCount(treeTraversed, logicalTraversed, true);
+			}
+			if (REBALANCE_MODE == RebalanceMode.Splay) {
+				splay(node, depth);
+			}
 			return (V) node.item;
+		}
+		if (TRAVERSAL_COUNT) {
+			finishCount(treeTraversed, logicalTraversed, false);
 		}
 		return null;
 	}
@@ -162,10 +228,13 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	final public boolean containsKey(final Object key) {
 		final Comparable<? super K> value = comparable(key);
 
-		AVLMapNode<K,V> node = root;
-		AVLMapNode<K,V> child;
+		int treeTraversed = 0;
+
+		MapNode<K,V> node = root;
+		MapNode<K,V> child;
 		int res = -1;
 		K val;
+		int depth = 0;
 		while (true) {
 			if (res == 0) break;
 			if (res > 0) {
@@ -173,21 +242,46 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			} else {
 				child = node.left;
 			}
+			if (TRAVERSAL_COUNT) {
+				treeTraversed++;
+			}
+			depth++;
 			if (child == null) break;
 			node = child;
 			val = node.key;
 			res = value.compareTo(val);
 		}
+		int logicalTraversed = 0;
+		boolean logical = false;
+		boolean a = false;
 		while (res < 0) {
+			a = true;
+			logical = true;
 			node = node.pred;
 			val =  node.key;
 			res = value.compareTo(val);
+			if (TRAVERSAL_COUNT) {
+				logicalTraversed++;
+			}
 		}
-		while (res > 0) {
+		while (!a && res > 0) {
+			logical = true;
 			node = node.succ;
 			val =  node.key;
 			res = value.compareTo(val);
-		} 
+			if (TRAVERSAL_COUNT) {
+				logicalTraversed++;
+			}
+		}
+		depth = logical ? 0 : depth;
+		if (res == 0 && node.valid) {
+			if (REBALANCE_MODE == RebalanceMode.Splay) {
+				splay(node, depth);
+			}
+		}
+		if (TRAVERSAL_COUNT) {
+			finishCount(treeTraversed, logicalTraversed, res == 0 && node.valid);
+		}
 		return (res == 0 && node.valid);
 	}
 	
@@ -243,12 +337,12 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 */
 	final private V insert(final K key, final V item, boolean putIfAbsent, boolean isReplace, Object replaceItem) {
 		final Comparable<? super K> value = comparable(key);
-		AVLMapNode<K,V> node = null;
+		MapNode<K,V> node = null;
 		K nodeValue = null;
 		int res = -1;
 		while (true) {
 			node = root;
-			AVLMapNode<K,V> child;
+			MapNode<K,V> child;
 			res = -1;
 			while (true) {
 				if (res == 0) break;
@@ -262,13 +356,13 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 				nodeValue = node.key;
 				res = value.compareTo(nodeValue);
 			}
-			final AVLMapNode<K,V> pred = res > 0 ? node : node.pred;
+			final MapNode<K,V> pred = res > 0 ? node : node.pred;
 			pred.lockSuccLock();
 			if (pred.valid) {
 				final K predVal = pred.key;
 				final int predRes = pred== node? res: value.compareTo(predVal);
 				if (predRes > 0) {
-					final AVLMapNode<K,V> succ = pred.succ;
+					final MapNode<K,V> succ = pred.succ;
 					final K succVal = succ.key;
 					final int res2 = succ == node? res: value.compareTo(succVal);
 					if (res2 <= 0) {
@@ -285,8 +379,8 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 							pred.unlockSuccLock();
 							return null;
 						}
-						final AVLMapNode<K,V> parent = chooseParent(pred, succ, node);
-						final AVLMapNode<K,V> newNode = new AVLMapNode<K,V>(key, item, pred, succ, parent);
+						final MapNode<K,V> parent = chooseParent(pred, succ, node);
+						final MapNode<K,V> newNode = new MapNode<K,V>(key, item, pred, succ, parent);
 						succ.pred = newNode;
 						pred.succ = newNode;
 						pred.unlockSuccLock();
@@ -308,9 +402,9 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param firstCand The node returned from the traversal
 	 * @return The correct parent
 	 */
-	final private AVLMapNode<K,V> chooseParent(final AVLMapNode<K,V> pred, 
-			final AVLMapNode<K,V> succ, final AVLMapNode<K,V> firstCand) {
-		AVLMapNode<K,V> candidate = firstCand == pred || firstCand == succ? firstCand: pred;
+	final private MapNode<K,V> chooseParent(final MapNode<K,V> pred, 
+			final MapNode<K,V> succ, final MapNode<K,V> firstCand) {
+		MapNode<K,V> candidate = firstCand == pred || firstCand == succ? firstCand: pred;
 		while (true) {
 			candidate.lockTreeLock();
 			if (candidate == pred) {
@@ -338,7 +432,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param newNode The new node
 	 * @param isRight Is the new node should be the parent's right child?
 	 */
-	final private void insertToTree(final AVLMapNode<K,V> parent, final AVLMapNode<K,V> newNode, final boolean isRight) {
+	final private void insertToTree(final MapNode<K,V> parent, final MapNode<K,V> newNode, final boolean isRight) {
 		if (isRight) {
 			parent.right = newNode;
 			parent.rightHeight = 1;
@@ -346,8 +440,8 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			parent.left = newNode;
 			parent.leftHeight = 1;
 		}
-		if (parent != root) {
-			AVLMapNode<K, V> grandParent = lockParent(parent);
+		if (REBALANCE_MODE == RebalanceMode.AVL && parent != root) {
+			MapNode<K, V> grandParent = lockParent(parent);
 			rebalance(grandParent, parent, grandParent.left == parent);
 		} else {
 			parent.unlockTreeLock();
@@ -363,8 +457,8 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param node The node 
 	 * @return The node's parent (which is locked)
 	 */
-	final private AVLMapNode<K,V> lockParent(final AVLMapNode<K,V> node) {
-		AVLMapNode<K, V> parent = node.parent;
+	final private MapNode<K,V> lockParent(final MapNode<K,V> node) {
+		MapNode<K, V> parent = node.parent;
 		parent.lockTreeLock();
 		while (node.parent != parent || !parent.valid) {
 			parent.unlockTreeLock();
@@ -376,6 +470,32 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			parent.lockTreeLock();
 		}
 		return parent;
+	}
+
+	class LockParentResult {
+		public final int conflicts;
+		public final MapNode<K,V> parent;
+		public LockParentResult(int conflicts, MapNode<K,V> parent) {
+			this.conflicts = conflicts;
+			this.parent = parent;
+		}
+	}
+
+	final private LockParentResult tryLockParent(final MapNode<K,V> node, int conflicts) {
+		for (int tries = 0; tries < SPIN_COUNT; tries++, conflicts++) {
+			if (conflicts >= CONFLICTS) {
+				return new LockParentResult(0, null);
+			}
+			MapNode<K, V> parent = node.parent;
+			if (parent.tryLockTreeLock()) {
+				if (node.parent == parent && parent.valid) {
+					return new LockParentResult(conflicts, parent);
+				}
+				parent.unlockTreeLock();
+			}
+			counts.get().failedLockAcquire++;
+		}
+		return new LockParentResult(0, null);
 	}
 
 	/**
@@ -408,12 +528,12 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 */
 	final public V remove(final Object key, final boolean compareItem, final Object item) {
 		Comparable<? super K> value = comparable(key);
-		AVLMapNode<K,V> pred, node = null;
+		MapNode<K,V> pred, node = null;
 		K nodeValue = null;
 		int res = 0;
 		while (true) {
 			node = root;
-			AVLMapNode<K,V> child;
+			MapNode<K,V> child;
 			res = -1;
 			while (true) {
 				if (res == 0) break;
@@ -433,7 +553,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 				final K predVal = pred.key;
 				final int predRes = pred== node? res: value.compareTo(predVal);
 				if (predRes > 0) {
-					AVLMapNode<K,V> succ = pred.succ;
+					MapNode<K,V> succ = pred.succ;
 					final K succVal = succ.key;
 					int res2 = succ == node? res: value.compareTo(succVal);
 					if (res2 <= 0) {
@@ -442,11 +562,11 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 							return null;
 						}
 						succ.lockSuccLock();
-						AVLMapNode<K,V> successor = acquireTreeLocks(succ);
-						AVLMapNode<K, V> succParent = lockParent(succ);
+						MapNode<K,V> successor = acquireTreeLocks(succ);
+						MapNode<K, V> succParent = lockParent(succ);
 						succ.valid = false;
 						V succItem = (V) succ.item;
-						AVLMapNode<K, V> succSucc = succ.succ; 
+						MapNode<K, V> succSucc = succ.succ; 
 						succSucc.pred = pred; 
 						pred.succ = succSucc;
 						succ.unlockSuccLock();
@@ -473,12 +593,18 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @return The node's successor, if the node has two children, and null,
 	 * otherwise
 	 */
-	final private AVLMapNode<K,V> acquireTreeLocks(final AVLMapNode<K,V> node) {
+	final private MapNode<K,V> acquireTreeLocks(final MapNode<K,V> node) {
 		while (true) {
 			node.lockTreeLock();
-			final AVLMapNode<K,V> right = node.right;
-			final AVLMapNode<K,V> left = node.left;
+			final MapNode<K,V> right = node.right;
+			final MapNode<K,V> left = node.left;
 			if (right == null || left == null) {
+				if (
+					REBALANCE_MODE == RebalanceMode.Splay
+					|| REBALANCE_MODE == RebalanceMode.None
+				) {
+					return null;
+				}
 				if (right != null && !right.tryLockTreeLock()) {
 					node.unlockTreeLock();
 					Thread.yield();
@@ -492,9 +618,9 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 				return null;
 			}
 
-			final AVLMapNode<K,V> successor = node.succ;
+			final MapNode<K,V> successor = node.succ;
 			
-			final AVLMapNode<K, V> parent = successor.parent;
+			final MapNode<K, V> parent = successor.parent;
 			if (parent != node) {
 				if (!parent.tryLockTreeLock()) {
 					node.unlockTreeLock();
@@ -513,7 +639,13 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 				Thread.yield();
 				continue;
 			}
-			final AVLMapNode<K,V> succRightChild = successor.right; // there is no left child to the successor, perhaps there is a right one, which we need to lock.
+			if (
+				REBALANCE_MODE == RebalanceMode.Splay
+				|| REBALANCE_MODE == RebalanceMode.None
+			) {
+				return successor;
+			}
+			final MapNode<K,V> succRightChild = successor.right; // there is no left child to the successor, perhaps there is a right one, which we need to lock.
 			if (succRightChild != null && !succRightChild.tryLockTreeLock()) {
 				node.unlockTreeLock();
 				successor.unlockTreeLock();
@@ -535,24 +667,28 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param succ The node's successor
 	 * @param parent The node's parent
 	 */
-	private void removeFromTree(AVLMapNode<K, V> node, AVLMapNode<K, V> succ, 
-			AVLMapNode<K, V> parent) {
+	private void removeFromTree(MapNode<K, V> node, MapNode<K, V> succ, 
+			MapNode<K, V> parent) {
 		if (succ == null) {
-			AVLMapNode<K, V> right = node.right;
-			final AVLMapNode<K,V> child = right == null ? node.left : right;
+			MapNode<K, V> right = node.right;
+			final MapNode<K,V> child = right == null ? node.left : right;
 			boolean left = updateChild(parent, node, child);
 			node.unlockTreeLock();
-			rebalance(parent,  child, left);
+			if (REBALANCE_MODE == RebalanceMode.AVL) {
+				rebalance(parent,  child, left);
+			} else {
+				parent.unlockTreeLock();
+			}
 			return;
 		}
-		AVLMapNode<K, V> oldParent = succ.parent;
-		AVLMapNode<K, V> oldRight = succ.right;
+		MapNode<K, V> oldParent = succ.parent;
+		MapNode<K, V> oldRight = succ.right;
 		updateChild(oldParent, succ, oldRight);
 
 		succ.leftHeight = node.leftHeight;
 		succ.rightHeight = node.rightHeight;
-		AVLMapNode<K, V> left = node.left;
-		AVLMapNode<K, V> right = node.right;
+		MapNode<K, V> left = node.left;
+		MapNode<K, V> right = node.right;
 		succ.parent = parent;
 		succ.left = left;
 		succ.right = right; 
@@ -574,7 +710,12 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 		}
 		node.unlockTreeLock();
 		parent.unlockTreeLock();
-		rebalance(oldParent, oldRight, isLeft);
+		if (REBALANCE_MODE == RebalanceMode.AVL) {
+			rebalance(oldParent, oldRight, isLeft);
+		} else {
+			oldParent.unlockTreeLock();
+			return;
+		}
 		
 		if (violated) {
 			succ.lockTreeLock();
@@ -596,8 +737,8 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param newChild The new child
 	 * @return true if the old child was a left child  
 	 */
-	private boolean updateChild(AVLMapNode<K, V> parent, AVLMapNode<K, V> oldChild,
-			final AVLMapNode<K, V> newChild) {
+	private boolean updateChild(MapNode<K, V> parent, MapNode<K, V> oldChild,
+			final MapNode<K, V> newChild) {
 		if (newChild != null) {
 			newChild.parent = parent;
 		}
@@ -619,13 +760,13 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param child The node's child
 	 * @param isLeft Is the given child a left child?
 	 */
-	final private void rebalance(AVLMapNode<K,V> node, AVLMapNode<K,V> child, boolean isLeft) {
+	final private void rebalance(MapNode<K,V> node, MapNode<K,V> child, boolean isLeft) {
 		if (node == root) {
 			node.unlockTreeLock();
 			if (child != null) child.unlockTreeLock();
 			return;
 		}
-		AVLMapNode<K,V> parent = null;
+		MapNode<K,V> parent = null;
 		try {
 			while (node != root) {
 				boolean updateHeight = updateHeight(child, node, isLeft);
@@ -648,7 +789,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 						isLeft = !isLeft;
 					}
 					if ((isLeft && child.getBalanceFactor() < 0) || (!isLeft && child.getBalanceFactor() > 0)) {
-						AVLMapNode<K,V> grandChild =  isLeft? child.right : child.left;
+						MapNode<K,V> grandChild =  isLeft? child.right : child.left;
 						if (!grandChild.tryLockTreeLock()) {
 							child.unlockTreeLock();
 							child = restart(node, parent);
@@ -676,7 +817,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 						isLeft = bf >= 2? false: true; // enforces to lock child
 						continue;
 					}
-					AVLMapNode<K, V> temp = child;
+					MapNode<K, V> temp = child;
 					child = node;
 					node = temp;
 					isLeft = node.left == child;
@@ -708,7 +849,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 *  
 	 * @return The node's (locked) child 
 	 */
-	final private AVLMapNode<K,V> restart(AVLMapNode<K,V> node, AVLMapNode<K,V> parent) {
+	final private MapNode<K,V> restart(MapNode<K,V> node, MapNode<K,V> parent) {
 		if (parent != null) {
 			parent.unlockTreeLock();
 		}
@@ -720,7 +861,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 				node.unlockTreeLock();
 				return null;
 			}
-			AVLMapNode<K, V> child = node.getBalanceFactor() >= 2? node.left : node.right;
+			MapNode<K, V> child = node.getBalanceFactor() >= 2? node.left : node.right;
 			if (child == null) return null;
 			if (child.tryLockTreeLock()) return child;
 			node.unlockTreeLock();
@@ -737,7 +878,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * 
 	 * @return true if the height was updated, and false otherwise
 	 */
-	final private boolean updateHeight(AVLMapNode<K,V> child, AVLMapNode<K,V> node, boolean isLeft) {
+	final private boolean updateHeight(MapNode<K,V> child, MapNode<K,V> node, boolean isLeft) {
 		int newHeight = child == null? 0: Math.max(child.leftHeight, child.rightHeight) + 1;
 		int oldHeight = isLeft? node.leftHeight : node.rightHeight;
 		if (newHeight == oldHeight) return false;
@@ -750,6 +891,73 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	}
 
 	/**
+	 * Splay the node.
+	 * The splay is done by traversing the tree (starting from the given 
+	 * node) and applying rotations. 
+	 * 
+	 * @param node The node to splay
+	 */
+	private void splay(MapNode<K,V> node, long depth) {
+		long iterations = 0;
+		if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth, iterations)) {
+			return;
+		}
+		int conflicts = 0;
+		node.lockTreeLock();
+		if (!node.valid) {
+			node.unlockTreeLock();
+			return;
+		}
+		LockParentResult lockRes = tryLockParent(node, conflicts);
+		if (lockRes.parent == null) {
+			node.unlockTreeLock();
+			return;
+		}
+		MapNode<K,V> parent = lockRes.parent;
+		conflicts = lockRes.conflicts;
+		while (parent != root) {
+			lockRes = tryLockParent(parent, conflicts);
+			if (lockRes.parent == null) {
+				break;
+			}
+			MapNode<K,V> gParent = lockRes.parent;
+			conflicts = lockRes.conflicts;
+			if (gParent == root) {
+				// zig
+				rotate(node, parent, gParent, parent.left != node);
+				parent.unlockTreeLock();
+				parent = gParent;
+				break;
+			}
+			lockRes = tryLockParent(gParent, conflicts);
+			if (lockRes.parent == null) {
+				gParent.unlockTreeLock();
+				break;
+			}
+			MapNode<K,V> ggParent = lockRes.parent;
+			if ((parent.left == node) == (gParent.left == parent)) {
+				// zig-zig
+				rotate(parent, gParent, ggParent, gParent.left != parent);
+				rotate(node, parent, ggParent, parent.left != node);
+			} else {
+				// zig-zag
+				rotate(node, parent, gParent, parent.left != node);
+				rotate(node, gParent, ggParent, gParent.left != node);
+			}
+			depth -= 2;
+			iterations++;
+			parent.unlockTreeLock();
+			gParent.unlockTreeLock();
+			parent = ggParent;
+			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth, iterations)) {
+				break;
+			}
+		}
+		parent.unlockTreeLock();
+		node.unlockTreeLock();
+	}
+
+	/**
 	 * Apply a single rotation to the given node.
 	 * 
 	 * @param child The node's child
@@ -757,7 +965,9 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param parent The node's parent
 	 * @param left Is this a left rotation?
 	 */
-	final private void rotate(final AVLMapNode<K,V> child, final AVLMapNode<K,V> node, final AVLMapNode<K,V> parent, boolean left) {
+	final private void rotate(final MapNode<K,V> child, final MapNode<K,V> node, final MapNode<K,V> parent, boolean left) {
+		if (STRUCT_MODS)
+			counts.get().structMods += 1;
 		if (parent.left == node) {
 			parent.left = child;
 		} else {
@@ -765,7 +975,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 		}
 		child.parent = parent;
 		node.parent = child;
-		AVLMapNode<K, V> grandChild = left? child.left : child.right;
+		MapNode<K, V> grandChild = left? child.left : child.right;
 		if (left) {
 			node.right = grandChild;
 			if (grandChild != null) {
@@ -813,7 +1023,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param node The given node
 	 * @return The height of the sub-tree rooted by node
 	 */
-	final public int height(AVLMapNode<K,V> node) {
+	final public int height(MapNode<K,V> node) {
 		if (node == null) return 0;
 		int rMax = height(node.right);
 		int lMax = height(node.left);
@@ -834,7 +1044,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param node The given node
 	 * @return The number of nodes in the sub-tree rooted at node
 	 */
-	final public int size(AVLMapNode<K,V> node) {
+	final public int size(MapNode<K,V> node) {
 		if (node == null) return 0;
 		int rMax = size(node.right);
 		int lMax = size(node.left);
@@ -862,7 +1072,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			 */
 			@Override
 			public int size() {
-				return LogicalOrderingAVL.this.size();
+				return LogicalOrdering.this.size();
 			}
 
 			/**
@@ -870,7 +1080,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			 */
 			@Override
 			public boolean isEmpty() {
-				return LogicalOrderingAVL.this.isEmpty();
+				return LogicalOrdering.this.isEmpty();
 			}
 
 			/**
@@ -898,7 +1108,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			 */
 			@Override
 			public boolean remove(Object o) {
-				return LogicalOrderingAVL.this.remove(((Entry) o).getKey(), ((Entry) o).getValue());
+				return LogicalOrdering.this.remove(((Entry) o).getKey(), ((Entry) o).getValue());
 			}
 			
 			/**
@@ -908,8 +1118,8 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 			public Iterator<java.util.Map.Entry<K, V>> iterator() {
 				return new Iterator<Map.Entry<K,V>>() {
 					
-					private AVLMapNode<K, V> curr = root.parent;
-					private AVLMapNode<K, V> currNext = curr;
+					private MapNode<K, V> curr = root.parent;
+					private MapNode<K, V> currNext = curr;
 					
 					@Override
 					public boolean hasNext() {
@@ -934,7 +1144,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 					@Override
 					public void remove() {
 						if (curr != root && curr != root.parent)
-						LogicalOrderingAVL.this.remove(curr.key, curr.item);
+						LogicalOrdering.this.remove(curr.key, curr.item);
 					}
 					
 				};
@@ -951,7 +1161,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 	 * @param <K>
 	 * @param <V>
 	 */
-	class AVLMapNode<K,V> {
+	class MapNode<K,V> {
 
 		/** The node's key. */
 		public final K key;
@@ -963,22 +1173,22 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 		public volatile boolean valid;
 		
 		/** The predecessor of the node (with respect to the ordering layout). */
-		public volatile AVLMapNode<K, V> pred;
+		public volatile MapNode<K, V> pred;
 		
 		/** The successor of the node (with respect to the ordering layout). */
-		public volatile AVLMapNode<K, V> succ;
+		public volatile MapNode<K, V> succ;
 		
 		/** The lock that protects the node's {@code succ} field and the {@code pred} field of the node pointed by {@code succ}. */
 		final public Lock succLock;
 
 		/** The parent of the node (with respect to the tree layout). */
-		public volatile AVLMapNode<K, V> parent;
+		public volatile MapNode<K, V> parent;
 		
 		/** The left child of the node (with respect to the tree layout). */
-		public volatile AVLMapNode<K, V> left;
+		public volatile MapNode<K, V> left;
 		
 		/** The right child of the node (with respect to the tree layout). */
-		public volatile AVLMapNode<K, V> right;
+		public volatile MapNode<K, V> right;
 		
 		/** The height of the sub-tree rooted at {@code left}. */
 		public int leftHeight;
@@ -998,7 +1208,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 		 * @param succ The new node's successor (with respect to the ordering layout)
 		 * @param parent The new node's parent (with respect to the tree layout)
 		 */
-		public AVLMapNode(final K key, final Object item, final AVLMapNode<K, V> pred, final AVLMapNode<K, V> succ, final AVLMapNode<K, V> parent) {
+		public MapNode(final K key, final Object item, final MapNode<K, V> pred, final MapNode<K, V> succ, final MapNode<K, V> parent) {
 			this.key = key;
 			this.item = item;
 			valid = true;
@@ -1020,7 +1230,7 @@ public class LogicalOrderingAVL<K, V> extends AbstractMap<K,V> implements Concur
 		 *  
 		 * @param key The new node's key
 		 */
-		public AVLMapNode(K key) {
+		public MapNode(K key) {
 			this(key, null, null, null, null);
 		}
 

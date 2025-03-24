@@ -1,12 +1,12 @@
 package contention.benchmark.workload.thread.loops.abstractions;
 
+import java.lang.reflect.Method;
+import java.util.Collection;
+
 import contention.abstractions.CompositionalMap;
 import contention.abstractions.DataStructure;
 import contention.benchmark.statistic.ThreadStatistic;
 import contention.benchmark.workload.stop.condition.StopCondition;
-
-import java.lang.reflect.Method;
-import java.util.Collection;
 
 public abstract class ThreadLoop implements Runnable {
     protected StopCondition stopCondition;
@@ -57,6 +57,13 @@ public abstract class ThreadLoop implements Runnable {
         this.stats.getCount = CompositionalMap.counts.get().getCount;
         this.stats.nodesTraversed = CompositionalMap.counts.get().nodesTraversed;
         this.stats.structMods = CompositionalMap.counts.get().structMods;
+        this.stats.foundCnt = CompositionalMap.counts.get().foundCnt;
+        this.stats.foundTreeTraversed = CompositionalMap.counts.get().foundTreeTraversed;
+        this.stats.foundLogicalTraversed = CompositionalMap.counts.get().foundLogicalTraversed;
+        this.stats.notFoundCnt = CompositionalMap.counts.get().notFoundCnt;
+        this.stats.notFoundTreeTraversed = CompositionalMap.counts.get().notFoundTreeTraversed;
+        this.stats.notFoundLogicalTraversed = CompositionalMap.counts.get().notFoundLogicalTraversed;
+        this.stats.failedLockAcquire = CompositionalMap.counts.get().failedLockAcquire;
         System.out.println("Thread #" + threadId + " finished.");
     }
 
