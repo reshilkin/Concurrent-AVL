@@ -28,14 +28,14 @@ public class DefaultArgsGeneratorBuilder implements ArgsGeneratorBuilder {
     @Override
     public DefaultArgsGeneratorBuilder init(int range) {
         this.range = range;
-        dataMapBuilder.init(range);
+//        dataMapBuilder.init(range);
         return this;
     }
 
     @Override
     public DefaultArgsGenerator build() {
         return new DefaultArgsGenerator(
-                dataMapBuilder.getOrBuild(),
+                dataMapBuilder.build(),
                 distributionBuilder.build(range)
         );
     }

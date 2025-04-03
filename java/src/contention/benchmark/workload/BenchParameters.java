@@ -1,5 +1,7 @@
 package contention.benchmark.workload;
 
+import contention.benchmark.json.serializers.DataMapBuilderSerializer;
+import contention.benchmark.workload.data.map.abstractions.DataMapBuilder;
 import contention.benchmark.workload.stop.condition.OperationCounter;
 import contention.benchmark.workload.thread.loops.builders.PrefillInsertThreadLoopBuilder;
 
@@ -104,6 +106,9 @@ public class BenchParameters {
     }
 
     public void init() {
+        for (DataMapBuilder currentBuilder : DataMapBuilderSerializer.getBuilders().values()) {
+            currentBuilder.init(range);
+        }
         test.init(range);
         prefill.init(range);
         warmUp.init(range);
