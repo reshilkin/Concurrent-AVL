@@ -112,16 +112,16 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 
 	static final double SPLAY_PROB = 1.0 / 10;
 	static final RebalanceMode REBALANCE_MODE = RebalanceMode.Splay;
-	// static final boolean STRUCT_MODS = true;
+	static final boolean STRUCT_MODS = true;
 
-	private static long getIterations(final long depth) {
-		// return depth / 9;
-		// return Math.max(0, depth - 13);
-		return depth / 8;
-	}
-
-	private static double rotateProb(final long depth) {
-		return 1.0;
+	private static double rotateProb(final long depth, final long iterations) {
+		if (iterations == 0) {
+			return SPLAY_PROB;
+		}
+		if (iterations * 6 < depth) {
+			return 1.0;
+		}
+		return 0;
 	}
 
 	/**
@@ -1090,10 +1090,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		return hN != hNRepl ? hNRepl : NothingRequired;
 	}
 
-	private void splay(Node<K, V> node, final long depth) {
-		long iterations = getIterations(depth);
-		while (node != null && iterations > 0) {
-			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth)) {
+	private void splay(Node<K, V> node, long depth) {
+		long iterations = 0;
+
+		while (node != null) {
+			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth, iterations)) {
 				break;
 			}
 			final Node<K, V> nParent = node.parent;
@@ -1105,6 +1106,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 				return;
 			}
 			final Node<K, V> nggParent = ngParent.parent;
+			Node<K, V> next;
 			if (nggParent == null) {
 				synchronized (ngParent) {
 					if (!isUnlinked(ngParent.changeOVL)
@@ -1133,7 +1135,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 											&& node.parent == nParent) {
 										synchronized (node) {
 											if (!isUnlinked(node.changeOVL)) {
-												node = splay_once(node, nParent, ngParent, nggParent);
+												next = splay_once(node, nParent, ngParent, nggParent);
+												if (next != node) {
+													depth -= 2;
+													node = next;
+												}
 											}
 										}
 									}
@@ -1143,7 +1149,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					}
 				}
 			}
-			iterations--;
+			iterations++;
 		}
 	}
 

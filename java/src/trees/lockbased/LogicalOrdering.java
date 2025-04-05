@@ -49,30 +49,24 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 	/** The keys' comparator */
 	private Comparator<? super K> comparator;
 
-	private RebalanceMode rebalanceMode = RebalanceMode.Splay;
+	final static RebalanceMode REBALANCE_MODE = RebalanceMode.Splay;
 	final static int CONFLICTS = 50;
 	final static int SPIN_COUNT = 50;
 	final static int YIELD_COUNT = 0;
-	final static double SplayProb = 1.0;
 	final static int MAX_DEPTH = 10;
-
-	final static int ITERATIONS = 1000000;
+	final static boolean STRUCT_MODS = true;
 
 	/** A constant object for the use of the {@code insert} method.  */
 	private final static Object EMPTY_ITEM = new Object();
 
-	final private double rotateProb(final long depth) {
-		return 1.0;
-		// return SplayProb * SplayProb;
-		// return SplayProb / Math.pow(2, MAX_DEPTH - depth);
-		// return 1;
-	}
-
-
-	private static long getIterations(final long depth) {
-		// return depth / 9;
-		// return Math.max(0, depth - 13);
-		return depth / 14;
+	private double rotateProb(final long depth, final long iterations) {
+		if (iterations == 0) {
+			return 1.0 / 80;
+		}
+		if (depth >= MAX_DEPTH) {
+			return 1.0;
+		}
+		return 0;
 	}
 
 	public LogicalOrdering() {
@@ -216,9 +210,9 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			if (TRAVERSAL_COUNT) {
 				finishCount(treeTraversed, logicalTraversed, true);
 			}
-			if (rebalanceMode == RebalanceMode.Splay && depth >= MAX_DEPTH && ThreadLocalRandom.current().nextDouble() < SplayProb) {
+			if (REBALANCE_MODE == RebalanceMode.Splay) {
 				splay(node, depth);
-			} else if (rebalanceMode == RebalanceMode.SimpleSplay && ThreadLocalRandom.current().nextDouble() < SplayProb) {
+			} else if (REBALANCE_MODE == RebalanceMode.SimpleSplay) {
 				simpleSplay(node);
 			}
 			return (V) node.item;
@@ -285,9 +279,9 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 		}
 		depth = logical ? 0 : depth;
 		if (res == 0 && node.valid) {
-			if (rebalanceMode == RebalanceMode.Splay && depth >= MAX_DEPTH && ThreadLocalRandom.current().nextDouble() < SplayProb) {
+			if (REBALANCE_MODE == RebalanceMode.Splay) {
 				splay(node, depth);
-			} else if (rebalanceMode == RebalanceMode.SimpleSplay && ThreadLocalRandom.current().nextDouble() < SplayProb) {
+			} else if (REBALANCE_MODE == RebalanceMode.SimpleSplay) {
 				simpleSplay(node);
 			}
 		}
@@ -452,7 +446,7 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			parent.left = newNode;
 			parent.leftHeight = 1;
 		}
-		if (rebalanceMode == RebalanceMode.AVL && parent != root) {
+		if (REBALANCE_MODE == RebalanceMode.AVL && parent != root) {
 			MapNode<K, V> grandParent = lockParent(parent);
 			rebalance(grandParent, parent, grandParent.left == parent);
 		} else {
@@ -625,9 +619,9 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			final MapNode<K,V> left = node.left;
 			if (right == null || left == null) {
 				if (
-					rebalanceMode == RebalanceMode.Splay
-					|| rebalanceMode == RebalanceMode.None
-					|| rebalanceMode == RebalanceMode.SimpleSplay
+					REBALANCE_MODE == RebalanceMode.Splay
+					|| REBALANCE_MODE == RebalanceMode.None
+					|| REBALANCE_MODE == RebalanceMode.SimpleSplay
 				) {
 					return null;
 				}
@@ -666,9 +660,9 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 				continue;
 			}
 			if (
-				rebalanceMode == RebalanceMode.Splay
-				|| rebalanceMode == RebalanceMode.None
-				|| rebalanceMode == RebalanceMode.SimpleSplay
+				REBALANCE_MODE == RebalanceMode.Splay
+				|| REBALANCE_MODE == RebalanceMode.None
+				|| REBALANCE_MODE == RebalanceMode.SimpleSplay
 			) {
 				return successor;
 			}
@@ -701,7 +695,7 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			final MapNode<K,V> child = right == null ? node.left : right;
 			boolean left = updateChild(parent, node, child);
 			node.unlockTreeLock();
-			if (rebalanceMode == RebalanceMode.AVL) {
+			if (REBALANCE_MODE == RebalanceMode.AVL) {
 				rebalance(parent,  child, left);
 			} else {
 				parent.unlockTreeLock();
@@ -737,7 +731,7 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 		}
 		node.unlockTreeLock();
 		parent.unlockTreeLock();
-		if (rebalanceMode == RebalanceMode.AVL) {
+		if (REBALANCE_MODE == RebalanceMode.AVL) {
 			rebalance(oldParent, oldRight, isLeft);
 		} else {
 			oldParent.unlockTreeLock();
@@ -947,26 +941,25 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 	 * 
 	 * @param node The node to splay
 	 */
-	final private void splay(MapNode<K,V> node, long depth) {
+	private void splay(MapNode<K,V> node, long depth) {
+		long iterations = 0;
+		if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth, iterations)) {
+			return;
+		}
 		int conflicts = 0;
 		node.lockTreeLock();
 		if (!node.valid) {
 			node.unlockTreeLock();
 			return;
 		}
-		LockParentResult lockRes = null;
-		lockRes = tryLockParent(node, conflicts);
+		LockParentResult lockRes = tryLockParent(node, conflicts);
 		if (lockRes.parent == null) {
 			node.unlockTreeLock();
 			return;
 		}
 		MapNode<K,V> parent = lockRes.parent;
 		conflicts = lockRes.conflicts;
-		long iterations = getIterations(depth);
-		while (parent != root && iterations > 0) {
-			if (depth < MAX_DEPTH && ThreadLocalRandom.current().nextDouble() >= rotateProb(depth)) {
-				break;
-			}
+		while (parent != root) {
 			lockRes = tryLockParent(parent, conflicts);
 			if (lockRes.parent == null) {
 				break;
@@ -996,10 +989,13 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 				rotate(node, gParent, ggParent, gParent.left != node);
 			}
 			depth -= 2;
+			iterations++;
 			parent.unlockTreeLock();
 			gParent.unlockTreeLock();
 			parent = ggParent;
-			iterations--;
+			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(depth, iterations)) {
+				break;
+			}
 		}
 		parent.unlockTreeLock();
 		node.unlockTreeLock();
