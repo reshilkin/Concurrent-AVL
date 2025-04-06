@@ -1,9 +1,11 @@
 package trees.lockbased;
 
+import java.sql.ParameterMetaData;
 import java.util.AbstractMap;
 import java.util.Comparator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
 
 import contention.abstractions.CompositionalMap;
@@ -33,6 +35,26 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	static final char Left = 'L';
 	static final char Right = 'R';
 	final V DELETED = (V) new Object();
+
+	public enum RebalanceMode {
+		AVL,
+		Splay,
+		None,
+	}
+
+	static final boolean STRUCT_MODS = true;
+	static final double SPLAY_PROB = 1.0 / 80;
+	static final RebalanceMode REBALANCE_MODE = RebalanceMode.Splay;
+
+	private double rotateProb(final long iterations, final long depth) {
+		if (iterations == 0) {
+			return SPLAY_PROB;
+		}
+		if (depth > 17) {
+			return 1.0;
+		}
+		return 0;
+	}
 
 	private class MaintenanceThread extends Thread {
 		LockBasedFriendlyTreeMap<K, V> map;
@@ -65,6 +87,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		volatile Node<K, V> right;
 		final ReentrantLock lock;
 		volatile boolean removed;
+		volatile Node<K, V> parent;
 
 		Node(final K key, final V value) {
 			this.key = key;
@@ -76,6 +99,20 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			this.bal.localh = 1;
 			this.bal.righth = 0;
 			this.bal.lefth = 0;
+			this.parent = null;
+		}
+
+		Node(final K key, final V value, final Node<K, V> left, final Node<K, V> right, Node<K, V> parent) {
+			this.key = key;
+			this.bal.localh = 0;
+			this.bal.righth = 0;
+			this.bal.lefth = 0;
+			this.value = value;
+			this.left = left;
+			this.right = right;
+			this.lock = new ReentrantLock(useFairLocks);
+			this.removed = false;
+			this.parent = parent;
 		}
 
 		Node(final K key, final int localh, final int lefth, final int righth,
@@ -89,6 +126,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			this.right = right;
 			this.lock = new ReentrantLock(useFairLocks);
 			this.removed = false;
+			this.parent = null;
 		}
 
 		void setupNode(final K key, final int localh, final int lefth,
@@ -102,6 +140,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			this.left = left;
 			this.right = right;
 			this.removed = false;
+			this.parent = null;
 		}
 
 		Node<K, V> child(char dir) {
@@ -200,6 +239,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		int rightCmp;
 
 		int nodesTraversed = 0;
+		long depth = 0;
 
 		while (true) {
 			current = next;
@@ -209,6 +249,9 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 				rightCmp = k.compareTo(current.key);
 			}
 			if (rightCmp == 0) {
+				if (REBALANCE_MODE == RebalanceMode.Splay) {
+					splay(current, depth);
+				}
 				V value = current.value;
 				if (value == DELETED) {
 					if (TRAVERSAL_COUNT) {
@@ -221,6 +264,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 				}
 				return value;
 			}
+			depth++;
 			if (rightCmp <= 0) {
 				next = current.left;
 			} else {
@@ -380,6 +424,9 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			if (!allocateOutside) {
 				n = new Node<K, V>(key, value);
 			}
+			if (REBALANCE_MODE == RebalanceMode.Splay) {
+				n.parent = current;
+			}
 			if (rightCmp <= 0) {
 				current.left = n;
 			} else {
@@ -396,6 +443,107 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	public Set<java.util.Map.Entry<K, V>> entrySet() {
 		// TODO Auto-generated method stub
 		return null;
+	}
+
+	private Node<K,V> lockParent(final Node<K,V> node) {
+		Node<K, V> parent = node.parent;
+		parent.lock.lock();
+		while (node.parent != parent) {
+			parent.lock.unlock();
+			parent = node.parent;
+			parent.lock.lock();
+		}
+		return parent;
+	}
+
+	private void splay(Node<K, V> n, long depth) {
+		long iterations = 0;
+		if (ThreadLocalRandom.current().nextDouble() >= rotateProb(iterations, depth)) {
+			return;
+		}
+		n.lock.lock();
+		if (n.removed || n == root) {
+			n.lock.unlock();
+			return;
+		}
+		Node<K, V> parent = lockParent(n);
+		if (!n.removed && n.value == DELETED && (n.left == null || n.right == null)) {
+			if (splayRemoveNode(n)) {
+				n.lock.unlock();
+				parent.lock.unlock();
+				return;
+			}
+		}
+		while (parent != root) {
+			Node<K, V> gParent = lockParent(parent);
+			if (!parent.removed && parent.value == DELETED && (parent.left == null || parent.right == null)) {
+				if (splayRemoveNode(parent)) {
+					gParent.lock.unlock();
+					break;
+				}
+			}
+			if (gParent == root) {
+				// zig
+				splayRotate(n);
+				parent.lock.unlock();
+				parent = gParent;
+				break;
+			}
+			Node<K,V> ggParent = lockParent(gParent);
+			if (!gParent.removed && gParent.value == DELETED && (gParent.left == null || gParent.right == null)) {
+				if (splayRemoveNode(gParent)) {
+					gParent.lock.unlock();
+					ggParent.lock.unlock();
+					break;
+				}
+			}
+			if ((parent.left == n) == (gParent.left == parent)) {
+				// zig-zig
+				splayRotate(parent);
+				splayRotate(n);
+			} else {
+				// zig-zag
+				splayRotate(n);
+				splayRotate(n);
+			}
+			parent.lock.unlock();
+			gParent.lock.unlock();
+			parent = ggParent;
+			iterations++;
+			depth -= 2;
+			if (ThreadLocalRandom.current().nextDouble() >= rotateProb(iterations, depth)) {
+				break;
+			}
+		}
+		n.lock.unlock();
+		parent.lock.unlock();
+	}
+
+	private boolean splayRemoveNode(Node<K, V> n) {
+		Node<K, V> parent, child;
+		if (n.value != DELETED) {
+			return false;
+		}
+		parent = n.parent;
+		if ((child = n.left) != null) {
+			if (n.right != null) {
+				return false;
+			}
+		} else {
+			child = n.right;
+		}
+		if (parent.left == n) {
+			parent.left = child;
+		} else {
+			parent.right = child;
+		}
+		if (child != null) {
+			child.parent = parent;
+		}
+		n.left = parent;
+		n.right = parent;
+		n.removed = true;
+		return true;
 	}
 
 	// maintenance
@@ -443,6 +591,41 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		}
 		parent.updateLocalh();
 		return true;
+	}
+
+	private void splayRotate(Node<K, V> node) {
+		if (node.parent.left == node) {
+			splayRightRotate(node.parent, node.parent.parent);
+		} else {
+			splayLeftRotate(node.parent, node.parent.parent);
+		}
+	}
+
+	// parent, n, l are not null and locked
+	private void splayRightRotate(Node<K, V> n, Node<K, V> parent) {
+		Node<K, V> l, lr, r, newNode;
+		l = n.left;
+		lr = l.right;
+		r = n.right;
+		newNode = new Node<>(n.key, n.value, lr, r, l);
+		if (r != null) {
+			r.parent = newNode;
+		}
+		if (lr != null) {
+			lr.parent = newNode;
+		}
+		l.right = newNode;
+		if (parent.left == n) {
+			parent.left = l;
+		} else {
+			parent.right = l;
+		}
+		l.parent = parent;
+		n.removed = true;
+		if (STRUCT_MODS) {
+			vars.rotations++;
+			counts.get().structMods++;
+		}
 	}
 
 	int rightRotate(Node<K, V> parent, char direction, boolean doRotate) {
@@ -501,6 +684,37 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		}
 		// System.out.println("right rotate");
 		return 1;
+	}
+
+	// parent, n, r are not null and locked
+	private void splayLeftRotate(Node<K, V> n, Node<K, V> parent) {
+		Node<K, V> r, rl, l, newNode;
+		r = n.right;
+		rl = r.left;
+		l = n.left;
+		newNode = new Node<>(n.key, n.value, l, rl, r);
+		if (l != null) {
+			l.parent = newNode;
+		}
+		if (rl != null) {
+			rl.parent = newNode;
+		}
+		r.left = newNode;
+
+		n.right = parent;
+		n.left = parent;
+
+		if (parent.left == n) {
+			parent.left = r;
+		} else {
+			parent.right = r;
+		}
+		r.parent = parent;
+		n.removed = true;
+		if (STRUCT_MODS) {
+			vars.rotations++;
+			counts.get().structMods++;
+		}
 	}
 
 	int leftRotate(Node<K, V> parent, char direction, boolean doRotate) {
@@ -691,22 +905,26 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	public boolean stopMaintenance() {
-		this.stop = true;
-		try {
-			this.mainThd.join();
-		} catch (InterruptedException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+		if (REBALANCE_MODE == RebalanceMode.AVL) {
+			this.stop = true;
+			try {
+				this.mainThd.join();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
 		}
 		return true;
 	}
 
 	public boolean startMaintenance() {
-		this.stop = false;
+		if (REBALANCE_MODE == RebalanceMode.AVL) {
+			this.stop = false;
 
-		mainThd = new MaintenanceThread(this);
+			mainThd = new MaintenanceThread(this);
 
-		mainThd.start();
+			mainThd.start();
+		}
 
 		return true;
 	}
