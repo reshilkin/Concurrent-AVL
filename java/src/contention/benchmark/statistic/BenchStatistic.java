@@ -25,6 +25,18 @@ public class BenchStatistic {
         StringBuilder stringBuilder = new StringBuilder()
                 .append(indentedTitleWithData("Average traversal length",
                         (double) commonStatistic.nodesTraversed / (double) commonStatistic.getCount, indents))
+                .append(indentedTitleWithData("Tree",
+                        (double) (commonStatistic.foundTreeTraversed + commonStatistic.notFoundTreeTraversed) / (double) commonStatistic.getCount, indents))
+                .append(indentedTitleWithData("Found",
+                        (double) commonStatistic.foundTreeTraversed / (double) commonStatistic.foundCnt, indents + 1))
+                .append(indentedTitleWithData("Not-found",
+                        (double) commonStatistic.notFoundTreeTraversed / (double) commonStatistic.notFoundCnt, indents + 1))
+                .append(indentedTitleWithData("Logical",
+                        (double) (commonStatistic.foundLogicalTraversed + commonStatistic.notFoundLogicalTraversed) / (double) commonStatistic.getCount, indents))
+                .append(indentedTitleWithData("Found",
+                        (double) commonStatistic.foundLogicalTraversed / (double) commonStatistic.foundCnt, indents + 1))
+                .append(indentedTitleWithData("Not-found",
+                        (double) commonStatistic.notFoundLogicalTraversed / (double) commonStatistic.notFoundCnt, indents + 1))
                 .append(indentedTitleWithData("Struct Modifications", commonStatistic.structMods, indents))
                 .append(indentedTitleWithData("Throughput (ops/s)", throughput, indents))
                 .append(indentedTitleWithData("Elapsed time (s)", elapsedTime, indents))
