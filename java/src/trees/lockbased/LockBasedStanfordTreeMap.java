@@ -456,9 +456,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					if (TRAVERSAL_COUNT) {
 						finishCount2(nodesTraversed);
 					}
-					if (REBALANCE_MODE == RebalanceMode.Splay
-						&& ThreadLocalRandom.current().nextDouble() < SPLAY_PROB
-					) {
+					if (REBALANCE_MODE == RebalanceMode.Splay) {
 						splay(child, depth);
 					}
 					return child.vOpt;
@@ -1176,6 +1174,8 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 						if (next != node) {
 							depth -= 2;
 						}
+					} else {
+						return;
 					}
 				} finally {
 					nggParent.lock.unlock();
