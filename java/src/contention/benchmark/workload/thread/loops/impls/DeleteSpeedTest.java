@@ -1,13 +1,16 @@
 package contention.benchmark.workload.thread.loops.impls;
 
+import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import contention.abstractions.CompositionalMap;
 import contention.abstractions.DataStructure;
-import contention.benchmark.workload.thread.loops.abstractions.ThreadLoop;
 import contention.benchmark.tools.Range;
-
-import java.lang.reflect.Method;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import contention.benchmark.workload.thread.loops.abstractions.ThreadLoop;
 
 public class DeleteSpeedTest extends ThreadLoop {
 
@@ -51,6 +54,13 @@ public class DeleteSpeedTest extends ThreadLoop {
         this.stats.getCount = CompositionalMap.counts.get().getCount;
         this.stats.nodesTraversed = CompositionalMap.counts.get().nodesTraversed;
         this.stats.structMods = CompositionalMap.counts.get().structMods;
+        this.stats.foundCnt = CompositionalMap.counts.get().foundCnt;
+        this.stats.foundTreeTraversed = CompositionalMap.counts.get().foundTreeTraversed;
+        this.stats.foundLogicalTraversed = CompositionalMap.counts.get().foundLogicalTraversed;
+        this.stats.notFoundCnt = CompositionalMap.counts.get().notFoundCnt;
+        this.stats.notFoundTreeTraversed = CompositionalMap.counts.get().notFoundTreeTraversed;
+        this.stats.notFoundLogicalTraversed = CompositionalMap.counts.get().notFoundLogicalTraversed;
+        this.stats.failedLockAcquire = CompositionalMap.counts.get().failedLockAcquire;
         System.out.println("Thread #" + threadId + " finished.");
     }
 
