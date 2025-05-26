@@ -42,12 +42,12 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 	}
 
 	static final boolean STRUCT_MODS = true;
-	static final double SPLAY_PROB = 1.0 / 5120000;
+	static final double SPLAY_PROB = 1.0 / 1;
 	static final RebalanceMode REBALANCE_MODE = RebalanceMode.Splay;
 	final static int CONFLICTS = 500;
 	static final long SPIN_COUNT = 100;
 	final static int THREAD_NUM = 8;
-	final static int MAX_DEPTH = 10;
+	final static int MAX_DEPTH = 1;
 
 	private double rotateProb(final long iterations, final long depth) {
 		if (iterations == 0) {
@@ -289,6 +289,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		final Comparable<? super K> k = comparable(key);
 		int rightCmp;
 		V value;
+		int nodesTraversed = 0;
 
 		while (true) {
 			current = next;
@@ -299,6 +300,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			}
 			if (rightCmp == 0) {
 				if (current.value == DELETED) {
+					counts.get().deleteNodesTraversed += nodesTraversed;
 					return null;
 				}
 				current.lock.lock();
@@ -308,6 +310,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 					current.lock.unlock();
 				}
 			}
+			nodesTraversed++;
 			if (rightCmp <= 0) {
 				next = current.left;
 			} else {
@@ -315,6 +318,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 			}
 			if (next == null) {
 				if (rightCmp != 0) {
+					counts.get().deleteNodesTraversed += nodesTraversed;
 					return null;
 				}
 				// this only happens if node is removed, so you take the
@@ -324,6 +328,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 				next = current.right;
 			}
 		}
+		counts.get().deleteNodesTraversed += nodesTraversed;
 		value = current.value;
 		if (value == DELETED) {
 			current.lock.unlock();
@@ -345,6 +350,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 		Node<K, V> n = null;
 		// int traversed = 0;
 		V val;
+		int nodesTraversed = 0;
 
 		while (true) {
 			current = next;
@@ -358,6 +364,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 				val = current.value;
 				if (val != DELETED) {
 					// System.out.println(traversed);
+					counts.get().insertNodesTraversed += nodesTraversed;
 					return val;
 				}
 				current.lock.lock();
@@ -367,6 +374,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 					current.lock.unlock();
 				}
 			}
+			nodesTraversed++;
 			if (rightCmp <= 0) {
 				next = current.left;
 			} else {
@@ -408,6 +416,7 @@ public class LockBasedFriendlyTreeMap<K, V> extends AbstractMap<K, V> implements
 				}
 			}
 		}
+		counts.get().insertNodesTraversed += nodesTraversed;
 		val = current.value;
 		if (rightCmp == 0) {
 			if (val == DELETED) {

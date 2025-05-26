@@ -700,7 +700,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 				} else if (right == rootHolder.right) {
 					// this is the protected .right
 					final Object vo = attemptUpdate(key, k, func, expected,
-							newValue, rootHolder, right, ovl);
+							newValue, rootHolder, right, ovl, 1);
 					if (vo != SpecialRetry) {
 						return vo;
 					}
@@ -735,7 +735,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	private Object attemptUpdate(final Object key,
 			final Comparable<? super K> k, final int func,
 			final Object expected, final Object newValue,
-			final Node<K, V> parent, final Node<K, V> node, final long nodeOVL) {
+			final Node<K, V> parent, final Node<K, V> node, final long nodeOVL, final int traversed) {
 		// As the search progresses there is an implicit min and max assumed for
 		// the
 		// branch of the tree rooted at node. A left rotation of a node x
@@ -754,6 +754,11 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 
 		final int cmp = k.compareTo(node.key);
 		if (cmp == 0) {
+			if (newValue == null) {
+				counts.get().deleteNodesTraversed += traversed;
+			} else {
+				counts.get().insertNodesTraversed += traversed;
+			}
 			return attemptNodeUpdate(func, expected, newValue, parent, node, nodeOVL);
 		}
 
@@ -772,6 +777,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// Removal is requested. Read of node.child occurred
 					// while parent.child was valid, so we were not affected
 					// by any shrinks.
+					counts.get().deleteNodesTraversed += traversed;
 					return null;
 				} else {
 					// Update will be an insert.
@@ -796,6 +802,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 							// We're valid. Does the user still want to
 							// perform the operation?
 							if (!shouldUpdate(func, null, expected)) {
+								counts.get().insertNodesTraversed += traversed;
 								return null;
 							}
 
@@ -816,6 +823,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 						node.lock.unlock();
 					}
 					if (success) {
+						counts.get().insertNodesTraversed += traversed;
 						fixHeightAndRebalance(damaged);
 						return null;
 					}
@@ -845,7 +853,7 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 					// no longer vulnerable to node shrinks, and we don't need
 					// to validate nodeOVL any more.
 					final Object vo = attemptUpdate(key, k, func, expected,
-							newValue, node, child, childOVL);
+							newValue, node, child, childOVL, traversed + 1);
 					if (vo != SpecialRetry) {
 						return vo;
 					}

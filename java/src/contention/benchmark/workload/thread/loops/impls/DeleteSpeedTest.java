@@ -53,6 +53,8 @@ public class DeleteSpeedTest extends ThreadLoop {
         // System.out.println(numAdd + " " + numRemove + " " + failures);
         this.stats.getCount = CompositionalMap.counts.get().getCount;
         this.stats.nodesTraversed = CompositionalMap.counts.get().nodesTraversed;
+        this.stats.insertNodesTraversed = CompositionalMap.counts.get().insertNodesTraversed;
+        this.stats.deleteNodesTraversed = CompositionalMap.counts.get().deleteNodesTraversed;
         this.stats.structMods = CompositionalMap.counts.get().structMods;
         this.stats.foundCnt = CompositionalMap.counts.get().foundCnt;
         this.stats.foundTreeTraversed = CompositionalMap.counts.get().foundTreeTraversed;

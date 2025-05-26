@@ -344,8 +344,10 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			node = root;
 			MapNode<K,V> child;
 			res = -1;
+			int nodesTraversed = 0;
 			while (true) {
 				if (res == 0) break;
+				nodesTraversed++;
 				if (res > 0) {
 					child = node.right;
 				} else {
@@ -358,6 +360,7 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 			}
 			final MapNode<K,V> pred = res > 0 ? node : node.pred;
 			pred.lockSuccLock();
+			counts.get().insertNodesTraversed += nodesTraversed;
 			if (pred.valid) {
 				final K predVal = pred.key;
 				final int predRes = pred== node? res: value.compareTo(predVal);
@@ -531,12 +534,14 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 		MapNode<K,V> pred, node = null;
 		K nodeValue = null;
 		int res = 0;
+		int nodesTraversed = 0;
 		while (true) {
 			node = root;
 			MapNode<K,V> child;
 			res = -1;
 			while (true) {
 				if (res == 0) break;
+				nodesTraversed++;
 				if (res > 0) {
 					child = node.right;
 				} else {
@@ -548,6 +553,7 @@ public class LogicalOrdering<K, V> extends AbstractMap<K,V> implements Concurren
 				res = value.compareTo(nodeValue);
 			}
 			pred = res > 0 ? node : node.pred;
+			counts.get().deleteNodesTraversed += nodesTraversed;
 			pred.lockSuccLock();
 			if (pred.valid) {
 				final K predVal = pred.key;
